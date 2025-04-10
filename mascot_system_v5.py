@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime
 from transformers import BlenderbotTokenizer, BlenderbotForConditionalGeneration
 from deep_translator import GoogleTranslator
+import logging
 
 from PyQt6.QtWidgets import (
     QApplication,
@@ -22,7 +23,7 @@ from PyQt6.QtWidgets import (
     QSizeGrip,
 )
 from PyQt6.QtGui import QPixmap, QFont, QKeyEvent, QTextCursor
-from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QSize, QThread
 
 # 設定定数
 BASE_DIR = Path(__file__).parent
@@ -31,6 +32,11 @@ CONVERSATION_HISTORY_FILE = BASE_DIR / "conversation_history.json"
 IMAGE_DIR = BASE_DIR / "assets"
 MAX_HISTORY_ENTRIES = 100
 EXIT_KEYWORDS = ["exit", "bye", "quit", "ばいばい", "さようなら", "またあとで"]
+
+# ログ設定
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 
 class SignalEmitter(QObject):
@@ -149,6 +155,71 @@ class Mascot(QWidget):
                 "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン",
             )
         ).strip()
+
+
+class ResponseGeneratorThread(QThread):
+    response_generated = pyqtSignal(str, str)  # (user_input, response)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, user_input, tokenizer, model, model_lock):
+        super().__init__()
+        self.user_input = user_input
+        self.tokenizer = tokenizer
+        self.model = model
+        self.model_lock = model_lock
+
+    def run(self):
+        try:
+            logging.info(f"User input: {self.user_input}")
+            logging.info(f"Input to translation: {self.user_input}")
+            try:
+                translated = GoogleTranslator(source="ja", target="en").translate(
+                    self.user_input
+                )
+                logging.info(f"Translated input: {translated}")
+            except Exception as e:
+                logging.error(f"Error during translation (JA to EN): {e}")
+                self.error_occurred.emit(
+                    "翻訳エラー: 日本語から英語への翻訳に失敗しました。"
+                )
+                return
+
+            try:
+                inputs = self.tokenizer(translated, return_tensors="pt")
+                with self.model_lock:
+                    response_ids = self.model.generate(
+                        **inputs,
+                        max_length=100,
+                        temperature=0.9,
+                        top_k=50,
+                        top_p=0.95,
+                        do_sample=True,
+                    )
+                response_en = self.tokenizer.decode(
+                    response_ids[0], skip_special_tokens=True
+                )
+                logging.info(f"Generated response (EN): {response_en}")
+            except Exception as e:
+                logging.error(f"Error during model response generation: {e}")
+                self.error_occurred.emit(
+                    "モデル応答生成エラー: 応答生成に失敗しました。"
+                )
+                return
+
+            try:
+                response = GoogleTranslator(source="en", target="ja").translate(
+                    response_en
+                )
+                logging.info(f"Translated response (JA): {response}")
+                self.response_generated.emit(self.user_input, response)
+            except Exception as e:
+                logging.error(f"Error during translation (EN to JA): {e}")
+                self.error_occurred.emit(
+                    "翻訳エラー: 英語から日本語への翻訳に失敗しました。"
+                )
+        except Exception as e:
+            logging.error(f"Error during response generation: {e}")
+            self.error_occurred.emit(str(e))
 
 
 class ChatInterface(QWidget):
@@ -354,31 +425,96 @@ class ChatInterface(QWidget):
                 f"[{datetime.now().strftime('%H:%M')}] mascot(プラグイン): {plugin_response}\n",
             )
         else:
-            threading.Thread(target=self._generate_response, args=(user_input,)).start()
+            self._start_response_thread(user_input)
 
-    def _generate_response(self, user_input):
+    def _load_trend_data(self):
         try:
-            translated = GoogleTranslator(source="ja", target="en").translate(
-                user_input
-            )
-            inputs = self.tokenizer(translated, return_tensors="pt")
-            with self.model_lock:
-                response_ids = self.model.generate(**inputs)
-            response_en = self.tokenizer.decode(
-                response_ids[0], skip_special_tokens=True
-            )
-            response = GoogleTranslator(source="en", target="ja").translate(response_en)
-
-            self.emitter.update_requested.emit(
-                "new_message",
-                f"[{datetime.now().strftime('%H:%M')}] あなた\n👹: {user_input}\n"
-                f"[{datetime.now().strftime('%H:%M')}] mascot\n🐰: {response}\n"
-                f"(最新の3Bパワーでお届けします！)",
-            )
-            self._save_conversation(user_input, response)
-
+            with open("../chat_data/trend_data.json", "r", encoding="utf-8") as f:
+                return json.load(f)
         except Exception as e:
-            self.emitter.update_requested.emit("error", str(e))
+            print(f"トレンドデータの読み込みエラー: {e}")
+            return {"topics": {"音楽": [], "映画": [], "Yahoo知恵袋": []}}
+
+    def _generate_prompt_with_trends(self, user_input):
+        trend_data = self._load_trend_data()
+        trends_text = "\n".join(
+            [
+                f"音楽: {', '.join(trend_data['topics'].get('音楽', []))}",
+                f"映画: {', '.join(trend_data['topics'].get('映画', []))}",
+                f"Yahoo知恵袋: {', '.join(trend_data['topics'].get('Yahoo知恵袋', []))}",
+            ]
+        )
+        return f"今日のトレンド情報:\n{trends_text}\n\nあなたの質問: {user_input}"
+
+    def _start_response_thread(self, user_input):
+        # ユーザー入力を保存
+        self.original_user_input = user_input
+
+        # トレンド情報をそのままプロンプトに含める
+        trend_data = self._load_trend_data()
+        trends_text = "\n".join(
+            [
+                f"音楽: {', '.join(trend_data['topics'].get('音楽', []))}",
+                f"映画: {', '.join(trend_data['topics'].get('映画', []))}",
+                f"Yahoo知恵袋: {', '.join(trend_data['topics'].get('Yahoo知恵袋', []))}",
+            ]
+        )
+        prompt = f"今日のトレンド情報:\n{trends_text}\n\nあなたの質問: {user_input}"
+
+        # ユーザー入力が日本語の場合のみ翻訳
+        if not self._is_english(user_input):
+            try:
+                translated_input = GoogleTranslator(source="ja", target="en").translate(
+                    user_input
+                )
+                logging.info(f"Translated user input: {translated_input}")
+            except Exception as e:
+                logging.error(f"Error during translation (JA to EN): {e}")
+                self._handle_response_error(
+                    "翻訳エラー: 日本語から英語への翻訳に失敗しました。"
+                )
+                return
+        else:
+            translated_input = user_input
+
+        # 翻訳済みのユーザー入力を使用して応答生成スレッドを開始
+        self.response_thread = ResponseGeneratorThread(
+            translated_input, self.tokenizer, self.model, self.model_lock
+        )
+        self.response_thread.response_generated.connect(self._handle_generated_response)
+        self.response_thread.error_occurred.connect(self._handle_response_error)
+        self.response_thread.start()
+
+    def _is_english(self, text):
+        # 簡易的に英語かどうかを判定
+        return all(ord(char) < 128 for char in text)
+
+    def _handle_generated_response(self, user_input, response):
+        # 応答を日本語に翻訳
+        try:
+            translated_response = GoogleTranslator(source="en", target="ja").translate(
+                response
+            )
+            logging.info(f"Translated response: {translated_response}")
+        except Exception as e:
+            logging.error(f"Error during translation (EN to JA): {e}")
+            self._handle_response_error("翻訳エラー: 応答の翻訳に失敗しました。")
+            return
+
+        # 日本語のユーザー入力と応答を表示
+        self.emitter.update_requested.emit(
+            "new_message",
+            f"[{datetime.now().strftime('%H:%M')}] あなた\n👹:{self.original_user_input}\n"
+            f"[{datetime.now().strftime('%H:%M')}] mascot\n🐰:{translated_response}\n",
+        )
+        self._save_conversation(self.original_user_input, translated_response)
+
+    def _get_original_user_input(self, user_input):
+        # ユーザー入力を元の日本語に戻す（翻訳前のデータを保持する仕組みを仮定）
+        return getattr(self, "original_user_input", user_input)
+
+    def _handle_response_error(self, error_message):
+        self.emitter.update_requested.emit("error", error_message)
 
     def _append_message(self, message):
         self.chat_display.append(message)
