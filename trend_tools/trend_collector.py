@@ -36,7 +36,14 @@ class TrendCollector:
             trends = []
             for article in soup.select(".mvp-blog-story-text h2"):
                 title = article.text.strip()
-                trends.append(title)
+                try:
+                    translated_title = GoogleTranslator(
+                        source="ja", target="en"
+                    ).translate(title)
+                except Exception as e:
+                    logging.error(f"Translation error for title '{title}': {e}")
+                    translated_title = title
+                trends.append(translated_title)
             self.trend_data["topics"]["音楽"] = trends
             self.trend_data["trending_words"].extend(trends)
             logging.info(f"Music trends: {trends}")
@@ -54,22 +61,29 @@ class TrendCollector:
         except requests.exceptions.RequestException as e:
             logging.error(f"Error fetching data from {url}: {e}")
             return
+
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             trends = []
             for movie_box in soup.select(".now-showing-box"):
-                title = movie_box.select_one("h3").text.strip() if movie_box.select_one("h3") else ""
-                release_date = movie_box.select_one(".red-heading p").text.strip() if movie_box.select_one(".red-heading p") else ""
-                official_site = movie_box.select_one("a[href*='http']")
-                official_site_link = official_site["href"] if official_site else ""
-                trends.append({
-                    "title": title,
-                    "release_date": release_date,
-                    "official_site": official_site_link
-                })
+                title = (
+                    movie_box.select_one("h3").text.strip()
+                    if movie_box.select_one("h3")
+                    else ""
+                )
+                try:
+                    translated_title = GoogleTranslator(
+                        source="ja", target="en"
+                    ).translate(title)
+                except Exception as e:
+                    logging.error(f"Translation error for title '{title}': {e}")
+                    translated_title = title
+                trends.append(translated_title)
+
             self.trend_data["topics"]["映画"] = trends
-            self.trend_data["trending_words"].extend([movie["title"] for movie in trends])
+            self.trend_data["trending_words"].extend(trends)
             logging.info(f"Movie trends: {trends}")
+
         logging.info("Movie trends fetched successfully.")
 
     def fetch_wikipedia_trends(self):
@@ -110,12 +124,101 @@ class TrendCollector:
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             trends = []
-            for question in soup.select(".ClapLv2TopListItem_Chie-ListItem__Question__11BeL h2"):
+            for question in soup.select(
+                ".ClapLv2TopListItem_Chie-ListItem__Question__11BeL h2"
+            ):
                 title = question.text.strip()
-                trends.append(title)
+                try:
+                    translated_title = GoogleTranslator(
+                        source="ja", target="en"
+                    ).translate(title)
+                except Exception as e:
+                    logging.error(f"Translation error for title '{title}': {e}")
+                    translated_title = title
+                trends.append(translated_title)
             self.trend_data["topics"]["Yahoo知恵袋"] = trends
             self.trend_data["trending_words"].extend(trends)
             logging.info(f"Trend words: {trends}")
+
+    def fetch_nhk_news_trends(self):
+        logging.info("Fetching NHK news trends...")
+        url = "https://www3.nhk.or.jp/news/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        try:
+            response = requests.get(url, headers=headers)
+            response.encoding = (
+                response.apparent_encoding
+            )  # エンコーディングを明示的に設定
+            response.raise_for_status()  # HTTPエラーを発生させる
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error fetching data from {url}: {e}")
+            return
+
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            trends = []
+            for article in soup.select(".content--list li dl dd a"):
+                title = (
+                    article.select_one("em.title").text.strip()
+                    if article.select_one("em.title")
+                    else ""
+                )
+
+                # タイトルを英語に翻訳
+                try:
+                    translated_title = GoogleTranslator(
+                        source="ja", target="en"
+                    ).translate(title)
+                except Exception as e:
+                    logging.error(f"Translation error for title '{title}': {e}")
+                    translated_title = title  # 翻訳に失敗した場合は元のタイトルを使用
+
+                trends.append(translated_title)
+
+            self.trend_data["topics"]["NHKニュース"] = trends
+            self.trend_data["trending_words"].extend(trends)
+            logging.info(f"NHK news trends: {trends}")
+
+        logging.info("NHK news trends fetched successfully.")
+
+    def fetch_toyokeizai_trends(self):
+        logging.info("Fetching Toyo Keizai trends...")
+        url = "https://toyokeizai.net/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()  # HTTPエラーを発生させる
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error fetching data from {url}: {e}")
+            return
+
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            trends = []
+            for item in soup.select(".ranking-list.hourly.clearfix ul li"):
+                title_tag = item.select_one(".ttl a span.title")
+                title = title_tag.text.strip() if title_tag else ""
+
+                # タイトルを英語に翻訳
+                try:
+                    translated_title = GoogleTranslator(
+                        source="ja", target="en"
+                    ).translate(title)
+                except Exception as e:
+                    logging.error(f"Translation error for title '{title}': {e}")
+                    translated_title = title  # 翻訳に失敗した場合は元のタイトルを使用
+
+                trends.append(translated_title)
+
+            self.trend_data["topics"]["東洋経済"] = trends
+            self.trend_data["trending_words"].extend(trends)
+            logging.info(f"Toyo Keizai trends: {trends}")
+
+        logging.info("Toyo Keizai trends fetched successfully.")
 
     def save_trends(self, file_path):
         logging.info(f"Saving trends to {file_path}...")
@@ -124,18 +227,18 @@ class TrendCollector:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         logging.info(f"Output directory ensured: {output_dir}")
-        self.trend_data["topics"]["音楽"] = translate_to_english(self.trend_data["topics"].get("音楽", []))
-        self.trend_data["topics"]["映画"] = translate_to_english(self.trend_data["topics"].get("映画", []))
-        self.trend_data["topics"]["Yahoo知恵袋"] = translate_to_english(self.trend_data["topics"].get("Yahoo知恵袋", []))
-        # `trending_words` を翻訳
-        self.trend_data["trending_words"] = translate_to_english(self.trend_data.get("trending_words", []))
+
+        # 翻訳を収集時に行うため、保存時にはそのまま保存
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(self.trend_data, f, ensure_ascii=False, indent=2)
         logging.info("Trends saved successfully.")
 
+
 def translate_to_english(data):
     try:
-        return [GoogleTranslator(source="ja", target="en").translate(item) for item in data]
+        return [
+            GoogleTranslator(source="ja", target="en").translate(item) for item in data
+        ]
     except Exception as e:
         logging.error(f"Translation error: {e}")
         return data
@@ -147,4 +250,6 @@ if __name__ == "__main__":
     collector.fetch_movie_trends()
     collector.fetch_wikipedia_trends()
     collector.fetch_trend_words()
+    collector.fetch_nhk_news_trends()
+    collector.fetch_toyokeizai_trends()
     collector.save_trends("../chat_data/trend_data.json")

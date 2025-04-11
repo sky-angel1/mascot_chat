@@ -25,6 +25,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QPixmap, QFont, QKeyEvent, QTextCursor
 from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QSize, QThread
 
+import threading
+from trend_tools.trend_collector import TrendCollector
+
 # 設定定数
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.json"
@@ -97,6 +100,24 @@ class Mascot(QWidget):
         self._setup_timers()
         self._current_expression = "normal"
         self.show_mascot = True  # マスコットの表示状態を管理
+
+        # バックグラウンドでトレンド情報を収集
+        self._collect_trend_data()
+
+    def _collect_trend_data(self):
+        def collect_data():
+            logging.info("Collecting trend data...")
+            collector = TrendCollector()
+            collector.fetch_nhk_news_trends()
+            collector.fetch_toyokeizai_trends()
+            collector.fetch_music_trends()
+            collector.fetch_movie_trends()
+            collector.fetch_trend_words()
+            collector.save_trends("../chat_data/trend_data.json")
+            logging.info("Trend data collection completed.")
+
+        trend_thread = threading.Thread(target=collect_data, daemon=True)
+        trend_thread.start()
 
     def initUI(self):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
