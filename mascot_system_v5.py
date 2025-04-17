@@ -8,7 +8,7 @@ from datetime import datetime
 from transformers import BlenderbotTokenizer, BlenderbotForConditionalGeneration
 from deep_translator import GoogleTranslator
 import logging
-
+import random
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -23,10 +23,11 @@ from PyQt6.QtWidgets import (
     QSizeGrip,
 )
 from PyQt6.QtGui import QPixmap, QFont, QKeyEvent, QTextCursor
-from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QSize, QThread
+from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QThread
 
 import threading
 from trend_tools.trend_collector import TrendCollector
+import torch
 
 # 設定定数
 BASE_DIR = Path(__file__).parent
@@ -206,7 +207,11 @@ class ResponseGeneratorThread(QThread):
                 return
 
             try:
-                inputs = self.tokenizer(translated, return_tensors="pt")
+                # inputs = self.tokenizer(translated, return_tensors="pt")
+                inputs = self.tokenizer(
+                    translated, return_tensors="pt", truncation=True, max_length=128
+                )
+
                 with self.model_lock:
                     response_ids = self.model.generate(
                         **inputs,
@@ -253,7 +258,6 @@ class ChatInterface(QWidget):
         self._load_history()
         self._setup_connections()
         self.plugins = self.load_plugins()
-
         self.tokenizer = BlenderbotTokenizer.from_pretrained("facebook/blenderbot-3B")
         self.model = BlenderbotForConditionalGeneration.from_pretrained(
             "facebook/blenderbot-3B"
@@ -454,53 +458,91 @@ class ChatInterface(QWidget):
                 return json.load(f)
         except Exception as e:
             print(f"トレンドデータの読み込みエラー: {e}")
-            return {"topics": {"音楽": [], "映画": [], "Yahoo知恵袋": []}}
+            return {
+                "topics": {
+                    "NHKニュース": [],
+                    "東洋経済": [],
+                    "音楽": [],
+                    "映画": [],
+                    "Yahoo知恵袋": [],
+                }
+            }
 
-    def _generate_prompt_with_trends(self, user_input):
-        trend_data = self._load_trend_data()
-        trends_text = "\n".join(
-            [
-                f"音楽: {', '.join(trend_data['topics'].get('音楽', []))}",
-                f"映画: {', '.join(trend_data['topics'].get('映画', []))}",
-                f"Yahoo知恵袋: {', '.join(trend_data['topics'].get('Yahoo知恵袋', []))}",
-            ]
-        )
-        return f"今日のトレンド情報:\n{trends_text}\n\nあなたの質問: {user_input}"
+    def _generate_dialog_prompt(self, translated_user_input, trend_data):
+        import random
+
+        def sample_trends(category, max_items=2):
+            items = [x for x in trend_data["topics"].get(category, []) if x.strip()]
+            return random.sample(items, min(len(items), max_items))
+
+        all_categories = {
+            "NHKニュース": "NHK",
+            "東洋経済": "Toyo Keizai",
+            "音楽": "Music",
+            "映画": "Movies",
+            "Yahoo知恵袋": "Yahoo Answers",
+            "スポーツ": "Sports",
+            "IT・テクノロジー": "Technology",
+            "海外ニュース": "World News",
+            "ゲーム": "Games"
+        }
+
+        selected_cats = random.sample(list(all_categories.items()), k=3)
+
+        trend_lines = []
+        for jp_cat, en_cat in selected_cats:
+            trends = sample_trends(jp_cat)
+            if trends:
+                trend_lines.append(f"- {en_cat}: " + "; ".join(trends))
+
+        # 🌟 Few-shot 会話例（改善効果大）
+        example = [
+            "Example:",
+            "User: What's popular today?",
+            "Assistant: According to recent trends, Lady Gaga's Coachella performance is the talk of the town!",
+            "",
+        ]
+
+        prompt_lines = [
+            "You are a friendly assistant having a conversation with a user.",
+            "",
+            "Here are some current trending topics (use them if relevant):",
+            *trend_lines,
+            "",
+            *example,
+            f"User: {translated_user_input}",
+            "Assistant (please reply naturally, using trends only if helpful):"
+        ]
+
+        prompt = "\n".join(prompt_lines)
+        return prompt[:700]  # 約150トークン程度に制限（モデルが反応しやすい）
+
+
 
     def _start_response_thread(self, user_input):
-        # ユーザー入力を保存
         self.original_user_input = user_input
 
-        # トレンド情報をそのままプロンプトに含める
+        # ① ユーザー入力を翻訳（日本語→英語）
+        try:
+            translated_input = GoogleTranslator(source="ja", target="en").translate(
+                user_input
+            )
+            logging.info(f"Translated user input: {translated_input}")
+        except Exception as e:
+            logging.error(f"Error translating user input: {e}")
+            self._handle_response_error("ユーザー入力の翻訳に失敗しました。")
+            return
+
+        # ② トレンドデータを読み込み
         trend_data = self._load_trend_data()
-        trends_text = "\n".join(
-            [
-                f"音楽: {', '.join(trend_data['topics'].get('音楽', []))}",
-                f"映画: {', '.join(trend_data['topics'].get('映画', []))}",
-                f"Yahoo知恵袋: {', '.join(trend_data['topics'].get('Yahoo知恵袋', []))}",
-            ]
-        )
-        prompt = f"今日のトレンド情報:\n{trends_text}\n\nあなたの質問: {user_input}"
 
-        # ユーザー入力が日本語の場合のみ翻訳
-        if not self._is_english(user_input):
-            try:
-                translated_input = GoogleTranslator(source="ja", target="en").translate(
-                    user_input
-                )
-                logging.info(f"Translated user input: {translated_input}")
-            except Exception as e:
-                logging.error(f"Error during translation (JA to EN): {e}")
-                self._handle_response_error(
-                    "翻訳エラー: 日本語から英語への翻訳に失敗しました。"
-                )
-                return
-        else:
-            translated_input = user_input
+        # ③ プロンプトを生成（翻訳済ユーザー入力 + トレンド）
+        final_prompt = self._generate_dialog_prompt(translated_input, trend_data)
+        logging.info(f"Final prompt input to model:\n{final_prompt}")
 
-        # 翻訳済みのユーザー入力を使用して応答生成スレッドを開始
+        # ④ 応答生成スレッドを起動
         self.response_thread = ResponseGeneratorThread(
-            translated_input, self.tokenizer, self.model, self.model_lock
+            final_prompt, self.tokenizer, self.model, self.model_lock
         )
         self.response_thread.response_generated.connect(self._handle_generated_response)
         self.response_thread.error_occurred.connect(self._handle_response_error)
@@ -511,24 +553,13 @@ class ChatInterface(QWidget):
         return all(ord(char) < 128 for char in text)
 
     def _handle_generated_response(self, user_input, response):
-        # 応答を日本語に翻訳
-        try:
-            translated_response = GoogleTranslator(source="en", target="ja").translate(
-                response
-            )
-            logging.info(f"Translated response: {translated_response}")
-        except Exception as e:
-            logging.error(f"Error during translation (EN to JA): {e}")
-            self._handle_response_error("翻訳エラー: 応答の翻訳に失敗しました。")
-            return
-
         # 日本語のユーザー入力と応答を表示
         self.emitter.update_requested.emit(
             "new_message",
             f"[{datetime.now().strftime('%H:%M')}] あなた\n👹:{self.original_user_input}\n"
-            f"[{datetime.now().strftime('%H:%M')}] mascot\n🐰:{translated_response}\n",
+            f"[{datetime.now().strftime('%H:%M')}] mascot\n🐰:{response}\n",
         )
-        self._save_conversation(self.original_user_input, translated_response)
+        self._save_conversation(self.original_user_input, response)
 
     def _get_original_user_input(self, user_input):
         # ユーザー入力を元の日本語に戻す（翻訳前のデータを保持する仕組みを仮定）
